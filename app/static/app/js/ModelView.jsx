@@ -6,7 +6,6 @@ import AssetDownloadButtons from './components/AssetDownloadButtons';
 import Standby from './components/Standby';
 import ShareButton from './components/ShareButton';
 import ImagePopup from './components/ImagePopup';
-import epsg from 'epsg';
 import PropTypes from 'prop-types';
 import * as THREE from 'THREE';
 import $ from 'jquery';
@@ -27,6 +26,9 @@ class TexturedModelMenu extends React.Component{
         this.state = {
             showTexturedModel: false
         }
+        
+        // Translation for sidebar.html
+        _("Cameras");
     }
 
     handleClick = (e) => {
@@ -119,24 +121,41 @@ class ModelView extends React.Component {
   }
 
   loadGeoreferencingOffset = (cb) => {
-    $.ajax({
-        url: `${this.assetsPath()}/odm_georeferencing/odm_georeferencing_model_geo.txt`,
-        type: 'GET',
-        error: () => {
-            console.warn("Cannot find odm_georeferencing_model_geo.txt (not georeferenced?)")
-            cb({x: 0, y: 0});
-        },
-        success: (data) => {
-            const lines = data.split("\n");
-            if (lines.length >= 2){
-                const [ x, y ] = lines[1].split(" ").map(parseFloat);
-                cb({x, y});
-            }else{
-                console.warn(`Malformed odm_georeferencing_model_geo.txt: ${data}`);
+    const geoFile = `${this.assetsPath()}/odm_georeferencing/coords.txt`;
+    const legacyGeoFile = `${this.assetsPath()}/odm_georeferencing/odm_georeferencing_model_geo.txt`;
+    const getGeoOffsetFromUrl = (url) => {
+        $.ajax({
+            url: url,
+            type: 'GET',
+            error: () => {
+                console.warn(`Cannot find ${url} (not georeferenced?)`);
                 cb({x: 0, y: 0});
+            },
+            success: (data) => {
+                const lines = data.split("\n");
+                if (lines.length >= 2){
+                    const [ x, y ] = lines[1].split(" ").map(parseFloat);
+                    cb({x, y});
+                }else{
+                    console.warn(`Malformed georeferencing file: ${data}`);
+                    cb({x: 0, y: 0});
+                }
             }
-        }
+        });
+    };
+
+    $.ajax({
+        type: "HEAD",
+        url: legacyGeoFile
+    }).done(() => {
+        // If a legacy georeferencing file is present
+        // we'll use that
+        getGeoOffsetFromUrl(legacyGeoFile);
+    }).fail(() => {
+        getGeoOffsetFromUrl(geoFile);
     });
+
+    
   }
 
   pointCloudFilePath = (cb) => {
@@ -168,6 +187,9 @@ class ModelView extends React.Component {
   }
 
   objFilePath(cb){
+    // Mostly for backward compatibility
+    // as newer versions of ODM do not have 
+    // a odm_textured_model.obj
     const geoUrl = this.texturedModelDirectoryPath() + 'odm_textured_model_geo.obj';
     const nongeoUrl = this.texturedModelDirectoryPath() + 'odm_textured_model.obj';
 
@@ -181,9 +203,20 @@ class ModelView extends React.Component {
     });
   }
 
-  mtlFilename(){
-    // For some reason, loading odm_textured_model_geo.mtl does not load textures properly
-    return 'odm_textured_model.mtl';
+  mtlFilename(cb){
+    // Mostly for backward compatibility
+    // as newer versions of ODM do not have 
+    // a odm_textured_model.mtl
+    const geoUrl = this.texturedModelDirectoryPath() + 'odm_textured_model_geo.mtl';
+
+    $.ajax({
+        type: "HEAD",
+        url: geoUrl
+    }).done(() => {
+        cb("odm_textured_model_geo.mtl");
+    }).fail(() => {
+        cb("odm_textured_model.mtl");
+    });
   }
 
   componentDidMount() {
@@ -194,7 +227,7 @@ class ModelView extends React.Component {
     viewer.setEDLEnabled(true);
     viewer.setFOV(60);
     viewer.setPointBudget(1*1000*1000);
-    viewer.setEDLEnabled(false); // Temporary fix: https://github.com/OpenDroneMap/WebODM/issues/873
+    viewer.setEDLEnabled(true);
     viewer.loadSettingsFromURL();
         
     viewer.loadGUI(() => {
@@ -360,7 +393,7 @@ class ModelView extends React.Component {
                     const cameraMesh = new THREE.Mesh(cameraObj.geometry, material);
                     cameraMesh.matrixAutoUpdate = false;
                     let scale = 1.0;
-                    if (!this.pointCloud.projection) scale = 0.1;
+                    // if (!this.pointCloud.projection) scale = 0.1;
 
                     cameraMesh.matrix.set(...getMatrix(feat.properties.translation, feat.properties.rotation, scale).elements);
                     
@@ -377,9 +410,14 @@ class ModelView extends React.Component {
   }
 
   setPointCloudsVisible = (flag) => {
-    for(let pointcloud of viewer.scene.pointclouds){
-        pointcloud.visible = flag;
-    }
+    viewer.setEDLEnabled(true);
+    
+    // Using opacity we can still perform measurements
+    viewer.setEDLOpacity(flag ? 1 : 0);
+
+    // for(let pointcloud of viewer.scene.pointclouds){
+    //     pointcloud.visible = flag;
+    // }
   }
 
   toggleCameras(e){
@@ -404,24 +442,26 @@ class ModelView extends React.Component {
         const mtlLoader = new THREE.MTLLoader();
         mtlLoader.setPath(this.texturedModelDirectoryPath());
 
-        mtlLoader.load(this.mtlFilename(), (materials) => {
-            materials.preload();
-
-            const objLoader = new THREE.OBJLoader();
-            objLoader.setMaterials(materials);
-            this.objFilePath(filePath => {
-                objLoader.load(filePath, (object) => {
-                    this.loadGeoreferencingOffset((offset) => {
-                        object.translateX(offset.x);
-                        object.translateY(offset.y);
-        
-                        viewer.scene.scene.add(object);
-        
-                        this.modelReference = object;
-                        this.setPointCloudsVisible(false);
-        
-                        this.setState({
-                            initializingModel: false,
+        this.mtlFilename(mtlPath => {
+            mtlLoader.load(mtlPath, (materials) => {
+                materials.preload();
+    
+                const objLoader = new THREE.OBJLoader();
+                objLoader.setMaterials(materials);
+                this.objFilePath(filePath => {
+                    objLoader.load(filePath, (object) => {
+                        this.loadGeoreferencingOffset((offset) => {
+                            object.translateX(offset.x);
+                            object.translateY(offset.y);
+            
+                            viewer.scene.scene.add(object);
+            
+                            this.modelReference = object;
+                            this.setPointCloudsVisible(false);
+            
+                            this.setState({
+                                initializingModel: false,
+                            });
                         });
                     });
                 });
@@ -487,15 +527,6 @@ class ModelView extends React.Component {
 }
 
 $(function(){
-    // Add more proj definitions
-    const defs = [];
-    for (let k in epsg){
-        if (epsg[k]){
-            defs.push([k, epsg[k]]);
-        }
-    }
-    window.proj4.defs(defs);
-
     // Use gettext for translations
     const oldInit = i18n.init;
     i18n.addPostProcessor("gettext", function(v, k, opts){
